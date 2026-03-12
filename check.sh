@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# Lightbits Cluster Deployment - Pre-flight Validation Script
+# Lightbits Cluster Deployment - Pre-flight Validation Script!
 # ==============================================================================
 
 # Console Colors & Symbols
