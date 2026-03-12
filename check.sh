@@ -135,7 +135,7 @@ fi
 # NVMe Drive Count Check
 if command -v lsblk >/dev/null 2>&1; then
     NVME_COUNT=$(lsblk -d -n -o NAME 2>/dev/null | grep '^nvme' | wc -l)
-    if [ "$NVME_COUNT" -ge 3 ]; then
+    if [ "$NVME_COUNT" -ge 8 ]; then
         pass "Found $NVME_COUNT NVMe device(s) attached"
     else
         warn "Found only $NVME_COUNT NVMe device(s). A minimum of 3 is recommended for a standard Lightbits node."
