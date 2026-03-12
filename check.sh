@@ -203,4 +203,4 @@ else
     echo -e "Once the environment is fixed, you will be ready to deploy your Lightbits cluster!"
 fi
 
-echo -e "${BLUE}${BOLD}======================================================${NC}
+echo -e "${BLUE}${BOLD}======================================================${NC}"
