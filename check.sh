@@ -120,6 +120,17 @@ fi
 # ------------------------------------------------------------------------------
 echo -e "\n${BOLD}[Hardware Capabilities]${NC}"
 
+# Memory (RAM) Check
+MIN_RAM_GB=64 # Replace 64 with your actual minimum requirement
+TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+TOTAL_RAM_GB=$((TOTAL_RAM_KB / 1024 / 1024))
+
+if [ "$TOTAL_RAM_GB" -ge "$MIN_RAM_GB" ]; then
+    pass "Sufficient RAM detected (${TOTAL_RAM_GB}GB available)"
+else
+    fail "Insufficient RAM detected (${TOTAL_RAM_GB}GB available, requires ${MIN_RAM_GB}GB+)"
+fi
+
 # NUMA Check
 if command -v lscpu >/dev/null 2>&1; then
     NUMA_NODES=$(lscpu | grep -i "NUMA node(s):" | awk '{print $3}')
