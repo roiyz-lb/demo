@@ -15,11 +15,30 @@ NC='\033[0m' # No Color
 CHECK="✅"
 CROSS="❌"
 WARNING="⚠️"
+FIXED="🔧"
 
 # Counters
 PASS_COUNT=0
 FAIL_COUNT=0
 WARN_COUNT=0
+FIX_COUNT=0
+
+# Hardware Specs Variables
+NVME_COUNT=0
+CORE_COUNT=0
+MEM_GB=0
+NIC_COUNT=0
+
+# OS Version Variable
+OS_MAJOR_VERSION=0
+
+# Error Log File
+ERROR_LOG="/var/log/lightbits_preflight_errors.log"
+
+# Initialize the log file
+echo "======================================================" > "$ERROR_LOG"
+echo " Lightbits Pre-Flight Error Log - $(date)" >> "$ERROR_LOG"
+echo "======================================================" >> "$ERROR_LOG"
 
 # Check for --fix argument
 FIX_MODE=0
@@ -34,8 +53,8 @@ echo -e "${BLUE}${BOLD}      Lightbits Pre-Flight Environment Checker        ${N
 echo -e "${BLUE}${BOLD}======================================================${NC}\n"
 
 if [[ $FIX_MODE -eq 1 ]]; then
-    echo -e "${YELLOW}ℹ️  INFO: '--fix' flag detected. Auto-remediation is not yet implemented.${NC}"
-    echo -e "${YELLOW}   Running in assessment mode only...${NC}\n"
+    echo -e "${YELLOW}ℹ️  INFO: '--fix' flag detected. Auto-remediation is enabled.${NC}"
+    echo -e "${YELLOW}   The script will attempt to install missing packages...${NC}\n"
 fi
 
 # Helper Functions
@@ -46,12 +65,19 @@ pass() {
 
 fail() {
     echo -e " ${RED}${CROSS} $1${NC}"
+    echo "$(date '+%H:%M:%S') [FAILED] $1" >> "$ERROR_LOG"
     ((FAIL_COUNT++))
 }
 
 warn() {
     echo -e " ${YELLOW}${WARNING} $1${NC}"
     ((WARN_COUNT++))
+}
+
+fixed() {
+    echo -e " ${GREEN}${FIXED} $1${NC}"
+    ((PASS_COUNT++))
+    ((FIX_COUNT++))
 }
 
 # ------------------------------------------------------------------------------
@@ -72,7 +98,8 @@ echo -e "\n${BOLD}[Operating System & Packages]${NC}"
 
 if [ -f /etc/os-release ]; then
     source /etc/os-release
-    if [[ "$ID" =~ ^(rhel|almalinux|rocky)$ ]] && [[ "$VERSION_ID" =~ ^(8|9) ]]; then
+    OS_MAJOR_VERSION=$(echo "$VERSION_ID" | cut -d. -f1)
+    if [[ "$ID" =~ ^(rhel|almalinux|rocky)$ ]] && [[ "$OS_MAJOR_VERSION" =~ ^(8|9) ]]; then
         pass "Supported OS detected: $PRETTY_NAME"
     else
         fail "Unsupported OS detected: $PRETTY_NAME (Requires RHEL/AlmaLinux/Rocky 8 or 9)"
@@ -90,16 +117,40 @@ if command -v python3 >/dev/null 2>&1; then
         fail "Python version is too old (Found v$PY_VER, requires 3.6+)"
     fi
 else
-    fail "Python 3 is not installed"
+    if [[ $FIX_MODE -eq 1 ]]; then
+        echo -e "    ${YELLOW}Attempting to install python3...${NC}"
+        if dnf install -y python3 >/dev/null 2>&1; then
+            fixed "Successfully installed Python 3"
+        else
+            fail "Failed to install Python 3 automatically"
+        fi
+    else
+        fail "Python 3 is not installed"
+    fi
 fi
 
-# Required Packages Check
-REQUIRED_PKGS=("firewalld" "network-scripts" "yum-utils" "net-tools")
+# Required Packages Check (Smart OS Detection)
+REQUIRED_PKGS=("firewalld" "yum-utils" "net-tools")
+
+# network-scripts is deprecated on OS version 9 and above, only check for it on version 8
+if [[ "$OS_MAJOR_VERSION" == "8" ]]; then
+    REQUIRED_PKGS+=("network-scripts")
+fi
+
 for pkg in "${REQUIRED_PKGS[@]}"; do
     if rpm -q "$pkg" >/dev/null 2>&1; then
         pass "Required package installed: $pkg"
     else
-        fail "Missing required package: $pkg"
+        if [[ $FIX_MODE -eq 1 ]]; then
+            echo -e "    ${YELLOW}Attempting to install missing package: $pkg...${NC}"
+            if dnf install -y "$pkg" >/dev/null 2>&1; then
+                fixed "Successfully installed missing package: $pkg"
+            else
+                fail "Failed to install package: $pkg"
+            fi
+        else
+            fail "Missing required package: $pkg"
+        fi
     fi
 done
 
@@ -120,17 +171,6 @@ fi
 # ------------------------------------------------------------------------------
 echo -e "\n${BOLD}[Hardware Capabilities]${NC}"
 
-# Memory (RAM) Check
-MIN_RAM_GB=64 # Replace 64 with your actual minimum requirement
-TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-TOTAL_RAM_GB=$((TOTAL_RAM_KB / 1024 / 1024))
-
-if [ "$TOTAL_RAM_GB" -ge "$MIN_RAM_GB" ]; then
-    pass "Sufficient RAM detected (${TOTAL_RAM_GB}GB available)"
-else
-    fail "Insufficient RAM detected (${TOTAL_RAM_GB}GB available, requires ${MIN_RAM_GB}GB+)"
-fi
-
 # NUMA Check
 if command -v lscpu >/dev/null 2>&1; then
     NUMA_NODES=$(lscpu | grep -i "NUMA node(s):" | awk '{print $3}')
@@ -146,7 +186,7 @@ fi
 # NVMe Drive Count Check
 if command -v lsblk >/dev/null 2>&1; then
     NVME_COUNT=$(lsblk -d -n -o NAME 2>/dev/null | grep '^nvme' | wc -l)
-    if [ "$NVME_COUNT" -ge 8 ]; then
+    if [ "$NVME_COUNT" -ge 3 ]; then
         pass "Found $NVME_COUNT NVMe device(s) attached"
     else
         warn "Found only $NVME_COUNT NVMe device(s). A minimum of 3 is recommended for a standard Lightbits node."
@@ -176,6 +216,24 @@ else
 fi
 
 # ------------------------------------------------------------------------------
+# 5. Gather System Specifications
+# ------------------------------------------------------------------------------
+# Cores
+if command -v nproc >/dev/null 2>&1; then
+    CORE_COUNT=$(nproc)
+fi
+
+# Memory (GB)
+if [ -f /proc/meminfo ]; then
+    MEM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
+fi
+
+# Physical NICs (Ignoring virtual interfaces like lo, tun, veth, etc.)
+if [ -d /sys/class/net ]; then
+    NIC_COUNT=$(ls -l /sys/class/net/ | grep -v virtual | grep -E '^d|l' | wc -l)
+fi
+
+# ------------------------------------------------------------------------------
 # Report Generation
 # ------------------------------------------------------------------------------
 echo -e "\n${BLUE}${BOLD}======================================================${NC}"
@@ -186,21 +244,37 @@ echo -e " ${GREEN}Passed Checks:   ${BOLD}$PASS_COUNT${NC}"
 if [[ $WARN_COUNT -gt 0 ]]; then
     echo -e " ${YELLOW}Warnings:        ${BOLD}$WARN_COUNT${NC}"
 fi
+if [[ $FIX_COUNT -gt 0 ]]; then
+    echo -e " ${GREEN}Auto-Fixed:      ${BOLD}$FIX_COUNT${NC}"
+fi
 echo -e " ${RED}Failed Checks:   ${BOLD}$FAIL_COUNT${NC}"
+
+echo -e "\n${BLUE}${BOLD}======================================================${NC}"
+echo -e "${BLUE}${BOLD}               System Specifications                  ${NC}"
+echo -e "${BLUE}${BOLD}======================================================${NC}"
+echo -e " OS Version:      ${BOLD}v${OS_MAJOR_VERSION}${NC}"
+echo -e " CPU Cores:       ${BOLD}${CORE_COUNT}${NC}"
+echo -e " Total Memory:    ${BOLD}${MEM_GB} GB${NC}"
+echo -e " Physical NICs:   ${BOLD}${NIC_COUNT}${NC}"
+echo -e " NVMe Devices:    ${BOLD}${NVME_COUNT}${NC}"
 echo ""
 
 if [[ $FAIL_COUNT -eq 0 && $WARN_COUNT -eq 0 ]]; then
     echo -e "${GREEN}${BOLD}Excellent! 🎉 Your server meets all the prerequisites and is fully ready for a Flawless Lightbits Installation!${NC}"
+    rm -f "$ERROR_LOG" # Clean up the log file if everything passes cleanly
 elif [[ $FAIL_COUNT -eq 0 && $WARN_COUNT -gt 0 ]]; then
     echo -e "${YELLOW}${BOLD}Good to go, but review the warnings above! ⚠️${NC}"
     echo -e "Your server meets the strict requirements, but you may have a sub-optimal hardware configuration (e.g., fewer than 3 NVMe drives)."
+    rm -f "$ERROR_LOG"
 else
     echo -e "${RED}${BOLD}Oh no! It looks like a few checks didn't pass. But don't worry, we've got you covered! 🛠️${NC}"
-    echo -e "You can automatically resolve the missing packages and OS configurations by running this script again with the '--fix' flag:\n"
-    
-    echo -e "${BOLD}  curl -sL https://github.com/your-repo/check.sh | sudo bash -s -- --fix${NC}\n"
-    
-    echo -e "Once the environment is fixed, you will be ready to deploy your Lightbits cluster!"
+    echo -e "A detailed error log has been saved to: ${BOLD}$ERROR_LOG${NC}\n"
+    if [[ $FIX_MODE -eq 0 ]]; then
+        echo -e "You can automatically resolve the missing packages by running this script again with the '--fix' flag:\n"
+        echo -e "${BOLD}  curl -sL https://github.com/your-repo/check.sh | sudo bash -s -- --fix${NC}\n"
+    else
+        echo -e "We attempted to fix the missing dependencies, but some issues (like hardware or OS partitions) require manual intervention."
+    fi
 fi
 
-echo -e "${BLUE}${BOLD}======================================================${NC}"
+echo -e "${BLUE}${BOLD}======================================================${NC}\n"
